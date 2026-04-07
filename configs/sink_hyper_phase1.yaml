@@ -1,0 +1,7 @@
+# Phase-1 sink-aware single-layer benchmark config
+# Expected tensor shape: [batch, heads, seq_len, dim]
+data_dir: data/pythia160m_layer8_head3_qkv
+output_dir: results/sink_hyper_phase1
+seq_lens: [512, 1024, 2048]
+input_dim: 64
+device: cuda
