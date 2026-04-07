@@ -36,12 +36,26 @@ class SinkAwareHyperAttention(nn.Module):
         )
 
     def forward(self, query, key, value, scale=None, causal=True, return_lse=False):
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
+
         if not causal:
             raise ValueError("SinkAwareHyperAttention currently supports causal=True only.")
 
         batch_size, n_heads, seq_len, dim = query.shape
         sink_size = min(self.sink_size, seq_len)
         scale = dim ** (-0.5) if scale is None else scale
+
+        if sink_size <= 0:
+            return self.hyper_attn(
+                query,
+                key,
+                value,
+                scale=scale,
+                causal=causal,
+                return_lse=return_lse,
+            )
 
         # Exact contribution over sink keys/values for all queries.
         prefix_attn, prefix_lse = exact_attention(

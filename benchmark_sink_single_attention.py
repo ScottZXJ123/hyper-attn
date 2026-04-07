@@ -70,6 +70,39 @@ def ensure_bhnd(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
+def resolve_dtype(dtype_name: str) -> torch.dtype:
+    mapping = {
+        "float32": torch.float32,
+        "fp32": torch.float32,
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+    }
+    key = dtype_name.lower()
+    if key not in mapping:
+        raise ValueError(f"Unsupported dtype '{dtype_name}'. Supported: {sorted(mapping.keys())}")
+    return mapping[key]
+
+
+def benchmark_runtime(fn, warmup=2, repeats=5):
+    for _ in range(warmup):
+        _ = fn()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    times = []
+    for _ in range(repeats):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        _ = fn()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        times.append((time.perf_counter() - t0) * 1000.0)
+
+    times = sorted(times)
+    return times[len(times) // 2]
 def time_forward(fn):
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -115,6 +148,13 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     seq_lens = set(cfg["seq_lens"])
+    base_seed = int(cfg.get("seed", 1234))
+    device = torch.device(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    dtype = resolve_dtype(cfg.get("dtype", "float32"))
+    warmup = int(cfg.get("warmup", 2))
+    repeats = int(cfg.get("repeats", 5))
+    max_samples = cfg.get("max_samples", None)
+    max_samples = int(max_samples) if max_samples is not None else None
     device = torch.device(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
 
     hyper = HyperAttention(
@@ -125,6 +165,7 @@ def main():
         min_seq_len=0,
         cuda=(device.type == "cuda"),
     ).to(device)
+    hyper.eval()
 
     sink_hyper = SinkAwareHyperAttention(
         input_dim=cfg["input_dim"],
@@ -135,6 +176,17 @@ def main():
         min_seq_len=0,
         cuda=(device.type == "cuda"),
     ).to(device)
+    sink_hyper.eval()
+
+    all_samples = load_samples(data_dir)
+    if max_samples is not None:
+        all_samples = all_samples[:max_samples]
+
+    rows = []
+    for i, sample in enumerate(all_samples):
+        q = ensure_bhnd(sample["q"]).to(device=device, dtype=dtype)
+        k = ensure_bhnd(sample["k"]).to(device=device, dtype=dtype)
+        v = ensure_bhnd(sample["v"]).to(device=device, dtype=dtype)
 
     rows = []
     for sample in load_samples(data_dir):
@@ -148,6 +200,45 @@ def main():
 
         if k.shape[2] != seq_len or v.shape[2] != seq_len:
             raise ValueError(f"q/k/v seq_len mismatch for sample {sample['sample_id']}: {q.shape}, {k.shape}, {v.shape}")
+
+        sample_seed = base_seed + i
+        if str(sample["sample_id"]).isdigit():
+            sample_seed = base_seed + int(sample["sample_id"])
+
+        # Correctness stage (seed-fixed, one pass per method)
+        torch.manual_seed(sample_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(sample_seed)
+        with torch.inference_mode():
+            o_exact, lse_exact = exact_attention(q, k, v, softmax_scale=q.shape[-1] ** -0.5, causal=True)
+
+            torch.manual_seed(sample_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(sample_seed)
+            o_hyper, lse_hyper = hyper(q, k, v, causal=True, return_lse=True)
+
+            torch.manual_seed(sample_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(sample_seed)
+            o_sink, lse_sink = sink_hyper(q, k, v, causal=True, return_lse=True)
+
+        # Runtime stage (independent warmup/repeated timing per method)
+        with torch.inference_mode():
+            t_exact = benchmark_runtime(
+                lambda: exact_attention(q, k, v, softmax_scale=q.shape[-1] ** -0.5, causal=True),
+                warmup=warmup,
+                repeats=repeats,
+            )
+            t_hyper = benchmark_runtime(
+                lambda: hyper(q, k, v, causal=True, return_lse=True),
+                warmup=warmup,
+                repeats=repeats,
+            )
+            t_sink = benchmark_runtime(
+                lambda: sink_hyper(q, k, v, causal=True, return_lse=True),
+                warmup=warmup,
+                repeats=repeats,
+            )
 
         (o_exact, lse_exact), t_exact = time_forward(lambda: exact_attention(q, k, v, softmax_scale=q.shape[-1] ** -0.5, causal=True))
         rows.append(

@@ -5,3 +5,7 @@ output_dir: results/sink_hyper_phase1
 seq_lens: [512, 1024, 2048]
 input_dim: 64
 device: cuda
+dtype: float32
+seed: 1234
+warmup: 2
+repeats: 5
