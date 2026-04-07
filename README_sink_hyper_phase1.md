@@ -66,57 +66,57 @@ Only samples with sequence length in `[512, 1024, 2048]` are evaluated.
 
 ## End-to-end guide (Vast.ai GPU instance)
 
-下面给你一套从**租机器 → 配环境 → 跑实验 → 看结果**的完整流程（针对你截图这种 L40S + CUDA 12.x 的机器）。
+This is a complete workflow from **renting a machine -> setting up environment -> running experiments -> checking outputs** (targeting an L40S + CUDA 12.x setup like your screenshot).
 
-### 0) 租机建议
-- GPU: `L40S` (48GB) 足够本阶段单层离线实验
-- 系统: Ubuntu 22.04
-- Python: 3.10 或 3.11
-- 磁盘: 建议 >= 50GB（代码 + 数据 + 结果）
-- 网络: 保证可以访问 GitHub / PyPI
+### 0) Recommended instance
+- GPU: `L40S` (48GB) is sufficient for this phase
+- OS: Ubuntu 22.04
+- Python: 3.10 or 3.11
+- Disk: >= 50GB recommended (code + data + outputs)
+- Network: allow access to GitHub / PyPI
 
-> 说明：本项目 Phase 1 只做离线单层 attention，不需要 patch 全模型。
+> Phase 1 is **offline single-layer attention only**. No full-LLM patching is required.
 
-### 1) 登录机器并准备系统依赖
+### 1) Prepare system packages
 ```bash
 sudo apt-get update
 sudo apt-get install -y git wget tmux htop
 ```
 
-可选：建议先开一个 `tmux`，避免 SSH 断连中断实验：
+Optional but recommended: start a `tmux` session to avoid interruption if SSH disconnects.
 ```bash
 tmux new -s sink_hyper
 ```
 
-### 2) 拉取代码
+### 2) Clone repository
 ```bash
 git clone <your-fork-or-repo-url> hyper-attn
 cd hyper-attn
 git checkout feat/sink-hyper-phase1
 ```
 
-### 3) 创建 Python 环境
-推荐 `venv`：
+### 3) Create Python environment
+Using `venv`:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 ```
 
-### 4) 安装核心依赖
-> 你机器显示 Max CUDA 12.7，通常可直接使用 PyTorch 官方 cu124 wheel（由驱动前向兼容）。
+### 4) Install dependencies
+Your machine shows CUDA 12.7 support. In practice, PyTorch `cu124` wheels usually work due to driver forward compatibility.
 
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 pip install pyyaml einops tqdm
 ```
 
-HyperAttention 代码依赖 triton。若你希望与仓库原说明一致可尝试：
+HyperAttention also depends on triton. To follow this repository's original recommendation:
 ```bash
 pip install triton==2.0.0.dev20221202 --no-deps
 ```
 
-### 5) 环境自检
+### 5) Environment sanity check
 ```bash
 python - <<'PY'
 import torch
@@ -127,52 +127,58 @@ if torch.cuda.is_available():
 PY
 ```
 
-若 `cuda available: False`，优先检查：
-- 是否租的是 GPU 机型
-- 宿主机驱动是否正常
-- 是否安装了 CPU 版 torch（需重装 cu124 版）
+If `cuda available: False`, check:
+- you rented a GPU instance (not CPU-only),
+- host driver is healthy,
+- you did not install CPU-only torch by mistake.
 
-### 6) 准备离线缓存 Q/K/V 数据
-默认配置读取目录：
+### 6) Prepare cached offline Q/K/V tensors
+Default data path:
 ```text
 data/pythia160m_layer8_head3_qkv
 ```
 
-你可以用两种格式之一：
+Two supported formats:
 
-1. 三文件格式
+1. Three-file format
 ```text
 data/pythia160m_layer8_head3_qkv/
   q.pt
   k.pt
   v.pt
 ```
-- 每个文件 tensor 形状可为：
-  - `[B,H,N,D]`（单样本）
-  - `[S,B,H,N,D]`（多样本）
+- each tensor can be:
+  - `[B,H,N,D]` (single sample)
+  - `[S,B,H,N,D]` (multiple samples)
 
-2. 多样本文件格式
+2. Per-sample file format
 ```text
 data/pythia160m_layer8_head3_qkv/
   sample_0.pt
   sample_1.pt
   ...
 ```
-- 每个 `.pt` 是 dict，至少包含 `q/k/v`
+- each `.pt` is a dict containing at least `q/k/v`
 
-并确保 tensor shape 为 `[batch, heads, seq_len, dim]`，且 `seq_len ∈ {512, 1024, 2048}`。
+Tensors must be in `[batch, heads, seq_len, dim]`, with `seq_len ∈ {512, 1024, 2048}`.
 
-### 7) 按阶段运行实验（推荐流程）
+### 6.1) Important note about Pythia model download
+This benchmark **does not automatically download Pythia-160M** and does not run full model inference.
+It consumes **already-exported cached Q/K/V tensors** only.
 
-#### Step 1: 小规模 sanity check
-目标：先验证流程和趋势是否正常（不直接全量跑）。
+If you do not yet have cached tensors, generate them in a separate preprocessing step (outside this phase) using Pythia-160M and save them into `data/pythia160m_layer8_head3_qkv`.
 
-复制一份配置：
+### 7) Run experiments in stages (recommended)
+
+#### Step 1: Small sanity check
+Goal: validate pipeline and trend first (before full run).
+
+Copy config:
 ```bash
 cp configs/sink_hyper_phase1.yaml configs/sink_hyper_phase1_sanity.yaml
 ```
 
-编辑 `configs/sink_hyper_phase1_sanity.yaml`，建议：
+Edit `configs/sink_hyper_phase1_sanity.yaml`:
 ```yaml
 seq_lens: [512]
 dtype: float32
@@ -182,48 +188,48 @@ warmup: 2
 repeats: 5
 ```
 
-运行：
+Run:
 ```bash
 python benchmark_sink_single_attention.py --config configs/sink_hyper_phase1_sanity.yaml
 ```
 
-重点看：
-- 三种方法是否都可运行
-- `sink_hyper` 的 `rel_frob_error` 是否低于 `hyper`
-- `sink_hyper` 的 `lse_mae` 是否更低或至少可比
+Check:
+- all three methods run correctly,
+- `sink_hyper` has lower `rel_frob_error` than `hyper`,
+- `sink_hyper` has lower or comparable `lse_mae`.
 
 #### Step 2: Full Phase 1 correctness
-在 sanity check 通过后，运行全量 correctness：
+After sanity passes, run full correctness:
 ```bash
 python benchmark_sink_single_attention.py --config configs/sink_hyper_phase1.yaml
 ```
 
-建议保持：
+Recommended settings:
 - `dtype: float32`
 - `seq_lens: [512, 1024, 2048]`
-- 全部样本
+- all prepared samples
 
 #### Step 3: Runtime benchmark
-确认 correctness 趋势后再做 timing：
-- 保持 warmup/repeats（当前默认 `2/5`）
-- GPU 环境下可改 `dtype: bfloat16` 做吞吐评估
+Run timing only after correctness trend is confirmed:
+- keep warmup/repeats (`2/5` by default),
+- optionally switch `dtype: bfloat16` on GPU for throughput-focused timing.
 
-例如创建运行时配置：
+Example runtime config flow:
 ```bash
 cp configs/sink_hyper_phase1.yaml configs/sink_hyper_phase1_runtime.yaml
-# 把 dtype 改成 bfloat16，然后运行
+# change dtype to bfloat16, then run:
 python benchmark_sink_single_attention.py --config configs/sink_hyper_phase1_runtime.yaml
 ```
 
-### 8) 输出结果位置
-默认输出目录：
+### 8) Output paths
+Default output directory:
 ```text
 results/sink_hyper_phase1/
   results.csv
   summary.json
 ```
 
-### 9) 快速查看结果
+### 9) Quick result inspection
 ```bash
 python - <<'PY'
 import pandas as pd
@@ -232,12 +238,12 @@ print(df.groupby(["seq_len","method"])[["rel_frob_error","lse_mae","runtime_ms"]
 PY
 ```
 
-### 10) 常见问题排查
+### 10) Troubleshooting
 - **`ModuleNotFoundError: torch`**  
-  说明 PyTorch 未安装到当前环境；确认已 `source .venv/bin/activate` 后重新安装。
+  PyTorch is not installed in the active environment. Re-activate `.venv` and reinstall.
 
-- **运行很慢 / OOM**  
-  先用 sanity 配置（`seq_len=512`, `max_samples=2`）检查，再逐步放开。
+- **Slow run / OOM**  
+  Start from sanity config (`seq_len=512`, `max_samples=2`) and scale up gradually.
 
-- **结果不稳定**  
-  本脚本已做每样本 seed 固定；请确认没有改动 `seed` 逻辑，并记录使用的配置文件。
+- **Unstable metrics**  
+  Per-sample seeds are fixed in this benchmark. Verify seed logic and keep config files versioned.
