@@ -90,9 +90,8 @@ tmux new -s sink_hyper
 
 ### 2) Clone repository
 ```bash
-git clone <your-fork-or-repo-url> hyper-attn
+git clone https://github.com/ScottZXJ123/hyper-attn
 cd hyper-attn
-git checkout feat/sink-hyper-phase1
 ```
 
 ### 3) Create Python environment
