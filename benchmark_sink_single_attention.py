@@ -103,6 +103,15 @@ def benchmark_runtime(fn, warmup=2, repeats=5):
 
     times = sorted(times)
     return times[len(times) // 2]
+def time_forward(fn):
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    out = fn()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+    return out, dt_ms
 
 
 def rel_fro_error(pred, exact):
@@ -146,6 +155,7 @@ def main():
     repeats = int(cfg.get("repeats", 5))
     max_samples = cfg.get("max_samples", None)
     max_samples = int(max_samples) if max_samples is not None else None
+    device = torch.device(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
 
     hyper = HyperAttention(
         input_dim=cfg["input_dim"],
@@ -177,6 +187,12 @@ def main():
         q = ensure_bhnd(sample["q"]).to(device=device, dtype=dtype)
         k = ensure_bhnd(sample["k"]).to(device=device, dtype=dtype)
         v = ensure_bhnd(sample["v"]).to(device=device, dtype=dtype)
+
+    rows = []
+    for sample in load_samples(data_dir):
+        q = ensure_bhnd(sample["q"]).to(device)
+        k = ensure_bhnd(sample["k"]).to(device)
+        v = ensure_bhnd(sample["v"]).to(device)
 
         seq_len = int(q.shape[2])
         if seq_len not in seq_lens:
@@ -224,6 +240,7 @@ def main():
                 repeats=repeats,
             )
 
+        (o_exact, lse_exact), t_exact = time_forward(lambda: exact_attention(q, k, v, softmax_scale=q.shape[-1] ** -0.5, causal=True))
         rows.append(
             {
                 "sample_id": sample["sample_id"],
@@ -235,6 +252,7 @@ def main():
             }
         )
 
+        (o_hyper, lse_hyper), t_hyper = time_forward(lambda: hyper(q, k, v, causal=True, return_lse=True))
         rows.append(
             {
                 "sample_id": sample["sample_id"],
@@ -246,6 +264,7 @@ def main():
             }
         )
 
+        (o_sink, lse_sink), t_sink = time_forward(lambda: sink_hyper(q, k, v, causal=True, return_lse=True))
         rows.append(
             {
                 "sample_id": sample["sample_id"],
